@@ -22,7 +22,7 @@ graph LR
     B <--> C[CKB Node WebSocket]
     B --> D[MQTT Sink]
     E[Thresh] --> A
-    B --> A
+    C --> E
 ```
 
 The service subscribes to raw transaction events, enriches them with input details by querying the CKB node, and publishes the enhanced transactions to a designated MQTT topic.
