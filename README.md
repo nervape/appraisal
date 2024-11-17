@@ -21,6 +21,8 @@ graph LR
     A[MQTT Source] --> B[Appraisal Service]
     B <--> C[CKB Node WebSocket]
     B --> D[MQTT Sink]
+    E[Thresh] --> A
+    B --> A
 ```
 
 The service subscribes to raw transaction events, enriches them with input details by querying the CKB node, and publishes the enhanced transactions to a designated MQTT topic.
