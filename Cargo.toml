@@ -15,3 +15,4 @@ uuid = { version = "1.4", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 native-tls = "0.2"
+axum = { version = "0.6" }

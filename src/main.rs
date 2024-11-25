@@ -3,7 +3,9 @@ use crate::service::TxDetailService;
 use tracing::{error, info};
 
 mod config;
+mod enrichment;
 mod error;
+mod http;
 mod service;
 mod types;
 mod websocket;
