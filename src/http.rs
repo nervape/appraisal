@@ -86,7 +86,7 @@ async fn get_transaction_handler(
 
     let normalized_hash = match validate_tx_hash(&hash) {
         Ok(h) => h,
-        Err(e) => return Err((StatusCode::BAD_REQUEST, e)),
+        Err(e) => return Err((StatusCode::BAD_REQUEST, Error::Http(e).to_string())),
     };
 
     let mut ws_client_guard = ws_client.lock().await;
@@ -126,7 +126,7 @@ async fn post_transaction_handler(
 
     let normalized_hash = match validate_tx_hash(&payload.tx_hash) {
         Ok(h) => h,
-        Err(e) => return Err((StatusCode::BAD_REQUEST, e)),
+        Err(e) => return Err((StatusCode::BAD_REQUEST, Error::Http(e).to_string())),
     };
 
     let mut ws_client_guard = ws_client.lock().await;

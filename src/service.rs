@@ -3,10 +3,7 @@ use crate::{
     websocket::WsClient,
 };
 use rumqttc::{AsyncClient, MqttOptions, QoS};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{error, info};
 
@@ -36,7 +33,7 @@ impl TxDetailService {
         })
     }
 
-    async fn process_transaction(&mut self, mut tx: Transaction) -> Result<Transaction, Error> {
+    async fn process_transaction(&mut self, tx: Transaction) -> Result<Transaction, Error> {
         let mut ws_client = self.ws_client.lock().await;
         enrich_transaction(tx, &mut ws_client).await
     }
