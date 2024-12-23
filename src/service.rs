@@ -19,8 +19,15 @@ impl TxDetailService {
         let ws_client = WsClient::new(&config.ckb_ws_url).await?;
         let ws_client = Arc::new(Mutex::new(ws_client));
 
-        let mqtt_options =
+        let mut mqtt_options =
             MqttOptions::new(&config.mqtt_client_id, &config.mqtt_host, config.mqtt_port);
+
+        if config.mqtt_username.is_some() {
+            mqtt_options.set_credentials(
+                config.mqtt_username.clone().unwrap(),
+                config.mqtt_password.clone().unwrap_or_default(),
+            );
+        }
 
         // Create both client and eventloop together
         let (mqtt_client, mqtt_eventloop) = AsyncClient::new(mqtt_options, 10);
@@ -53,7 +60,7 @@ impl TxDetailService {
 
         let semaphore = std::sync::Arc::new(Semaphore::new(self.config.concurrent_requests));
         self.mqtt_client
-            .subscribe("ckb.transactions.proposed", QoS::AtLeastOnce)
+            .subscribe(self.config.mqtt_subscribe_topic.clone(), QoS::AtLeastOnce)
             .await?;
 
         while let Ok(notification) = self.mqtt_eventloop.poll().await {
@@ -67,7 +74,7 @@ impl TxDetailService {
                                 if let Err(e) = self
                                     .mqtt_client
                                     .publish(
-                                        "ckb.transactions.proposed.detailed",
+                                        self.config.mqtt_publish_topic.clone(),
                                         QoS::AtLeastOnce,
                                         false,
                                         serde_json::to_string(&detailed_tx)?,
