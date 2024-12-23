@@ -16,4 +16,7 @@ pub enum Error {
 
     #[error("Transaction processing error: {0}")]
     TxProcessing(String),
+
+    #[error("HTTP error: {0}")]
+    Http(String),
 }
