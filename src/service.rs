@@ -5,7 +5,7 @@ use crate::{
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub struct TxDetailService {
     ws_client: Arc<Mutex<WsClient>>,
@@ -52,8 +52,9 @@ impl TxDetailService {
 
         // Spawn HTTP server in a separate task
         let http_port = self.config.http_port;
+        let http_address = self.config.http_address.to_owned();
         tokio::spawn(async move {
-            http_server.start(http_port).await;
+            http_server.start(http_address, http_port).await;
         });
 
         info!("Starting transaction processing service");
@@ -66,6 +67,7 @@ impl TxDetailService {
         while let Ok(notification) = self.mqtt_eventloop.poll().await {
             if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(msg)) = notification {
                 if let Ok(tx_str) = String::from_utf8(msg.payload.to_vec()) {
+                    debug!("Received transaction: {}", tx_str);
                     if let Ok(tx) = serde_json::from_str::<Transaction>(&tx_str) {
                         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
