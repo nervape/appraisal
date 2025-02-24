@@ -7,18 +7,13 @@ WORKDIR /usr/src/app
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Copy the Cargo files first to cache dependencies
+# Copy only dependency files first to leverage cache
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src/
-
-# Copy the actual source code
+# Copy actual source code
 COPY src ./src
 
 # Build the application
@@ -31,21 +26,33 @@ FROM debian:bullseye-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl1.1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy the binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/appraisal /usr/local/bin/
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Create a non-root user
-RUN useradd -m appuser
+RUN useradd -m -s /bin/bash -u 1000 appuser
+
+# Create directory for the app
+WORKDIR /app
+
+# Copy the binary from the builder stage
+COPY --from=builder /usr/src/app/target/release/appraisal /app/
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
 USER appuser
 
 # Set environment variables
-ENV RUST_LOG=info
-ENV CKB_WS_URL
-ENV MQTT_HOST
-ENV MQTT_PORT
-ENV MQTT_CLIENT_ID=ckb-appraisal
-ENV CONCURRENT_REQUESTS=10
+ENV RUST_LOG=info \
+    CKB_WS_URL= \
+    MQTT_HOST= \
+    MQTT_PORT= \
+    MQTT_USERNAME= \
+    MQTT_PASSWORD= \
+    MQTT_CLIENT_ID=ckb-appraisal \
+    CONCURRENT_REQUESTS=10
 
-CMD ["appraisal"]
+# Use exec form and full path
+CMD ["/app/appraisal"]
