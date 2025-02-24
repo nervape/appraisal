@@ -28,6 +28,7 @@ impl TxDetailService {
                 config.mqtt_password.clone().unwrap_or_default(),
             );
         }
+        mqtt_options.set_max_packet_size(usize::MAX, usize::MAX);
 
         // Create both client and eventloop together
         let (mqtt_client, mqtt_eventloop) = AsyncClient::new(mqtt_options, 10);
