@@ -11,6 +11,7 @@ pub struct Config {
     pub mqtt_subscribe_topic: String,
     pub mqtt_publish_topic: String,
     pub concurrent_requests: usize,
+    pub http_address: String,
     pub http_port: u16,
 }
 
@@ -36,6 +37,7 @@ impl Config {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .unwrap_or(10),
+            http_address: std::env::var("HTTP_ADDRESS").unwrap_or("0.0.0.0".to_string()),
             http_port: std::env::var("HTTP_PORT")
                 .unwrap_or_else(|_| "3112".to_string())
                 .parse()

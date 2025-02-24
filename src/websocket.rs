@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use tracing::error;
 use tracing::info;
+use tracing::{debug, error};
 use uuid::Uuid;
 
 pub struct WsClient {

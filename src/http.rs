@@ -28,7 +28,7 @@ impl HttpServer {
         Self { ws_client }
     }
 
-    pub async fn start(self, port: u16) {
+    pub async fn start(self, address: String, port: u16) {
         let ws_client = self.ws_client.clone();
         let ws_client_post = self.ws_client.clone();
 
@@ -42,7 +42,7 @@ impl HttpServer {
                 post(move |payload| post_transaction_handler(payload, ws_client_post.clone())),
             );
 
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("{}:{}", address, port);
         info!("Starting HTTP server on {}", addr);
 
         axum::Server::bind(&addr.parse().unwrap())
