@@ -3,7 +3,7 @@ use crate::{
     websocket::WsClient,
 };
 use rumqttc::{AsyncClient, MqttOptions, QoS};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info};
 
@@ -28,7 +28,7 @@ impl TxDetailService {
                 config.mqtt_password.clone().unwrap_or_default(),
             );
         }
-        mqtt_options.set_max_packet_size(usize::MAX, usize::MAX);
+        mqtt_options.set_keep_alive(Duration::from_secs(5));
 
         // Create both client and eventloop together
         let (mqtt_client, mqtt_eventloop) = AsyncClient::new(mqtt_options, 10);
