@@ -20,7 +20,7 @@ COPY src ./src
 RUN cargo build --release
 
 # Create the runtime image
-FROM debian:bullseye-slim
+FROM rust:1.73-slim-bullseye
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
