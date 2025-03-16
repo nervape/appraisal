@@ -34,6 +34,8 @@ impl TxDetailService {
         
         // Increase keep alive for better connection stability
         mqtt_options.set_keep_alive(Duration::from_secs(30));
+
+        mqtt_options.set_max_packet_size(10 * 1024 * 1024, 10 * 1024 * 1024);
         
         // Use clean_session(false) to maintain session state on server
         mqtt_options.set_clean_session(false);
