@@ -1,19 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TransactionResponse {
-    pub result: TransactionWrapper,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TransactionWrapper {
-    pub transaction: Transaction,
-    pub tx_status: String,
-    #[serde(flatten)]
-    pub other: serde_json::Value,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Transaction {
     pub hash: String,
     pub inputs: Vec<Input>,
@@ -62,10 +49,4 @@ pub struct Script {
     pub args: String,
     pub code_hash: String,
     pub hash_type: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DetailedTransaction {
-    pub original_tx: Transaction,
-    pub input_details: Vec<Output>,
 }

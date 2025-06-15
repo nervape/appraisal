@@ -2,46 +2,69 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_ckb_ws_url")]
     pub ckb_ws_url: String,
+    #[serde(default = "default_mqtt_host")]
     pub mqtt_host: String,
+    #[serde(default = "default_mqtt_port")]
     pub mqtt_port: u16,
+    #[serde(default = "default_mqtt_client_id")]
     pub mqtt_client_id: String,
     pub mqtt_username: Option<String>,
     pub mqtt_password: Option<String>,
+    #[serde(default = "default_mqtt_subscribe_topic")]
     pub mqtt_subscribe_topic: String,
+    #[serde(default = "default_mqtt_publish_topic")]
     pub mqtt_publish_topic: String,
+    #[serde(default = "default_concurrent_requests")]
     pub concurrent_requests: usize,
+    #[serde(default = "default_http_address")]
     pub http_address: String,
+    #[serde(default = "default_http_port")]
     pub http_port: u16,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, crate::error::Error> {
-        Ok(Config {
-            ckb_ws_url: std::env::var("CKB_WS_URL")
-                .unwrap_or_else(|_| "ws://localhost:8114".to_string()),
-            mqtt_host: std::env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".to_string()),
-            mqtt_port: std::env::var("MQTT_PORT")
-                .unwrap_or_else(|_| "1883".to_string())
-                .parse()
-                .map_err(|_| crate::error::Error::Config("Invalid MQTT port".to_string()))?,
-            mqtt_client_id: std::env::var("MQTT_CLIENT_ID")
-                .unwrap_or_else(|_| "ckb-tx-detail-service".to_string()),
-            mqtt_username: std::env::var("MQTT_USERNAME").ok(),
-            mqtt_password: std::env::var("MQTT_PASSWORD").ok(),
-            mqtt_subscribe_topic: std::env::var("MQTT_TOPIC")
-                .unwrap_or_else(|_| "ckb.transactions.proposed".to_string()),
-            mqtt_publish_topic: std::env::var("MQTT_ENRICH_TOPIC")
-                .unwrap_or_else(|_| "ckb.transactions.detailed.proposed".to_string()),
-            concurrent_requests: std::env::var("CONCURRENT_REQUESTS")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(10),
-            http_address: std::env::var("HTTP_ADDRESS").unwrap_or("0.0.0.0".to_string()),
-            http_port: std::env::var("HTTP_PORT")
-                .unwrap_or_else(|_| "3112".to_string())
-                .parse()
-                .unwrap_or(3112),
-        })
+        match envy::from_env::<Config>() {
+            Ok(config) => Ok(config),
+            Err(e) => Err(crate::error::Error::Config(e.to_string())),
+        }
     }
+}
+
+fn default_ckb_ws_url() -> String {
+    "ws://localhost:8114".to_string()
+}
+
+fn default_mqtt_host() -> String {
+    "localhost".to_string()
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
+}
+
+fn default_mqtt_client_id() -> String {
+    "ckb-tx-detail-service".to_string()
+}
+
+fn default_mqtt_subscribe_topic() -> String {
+    "ckb.transactions.proposed".to_string()
+}
+
+fn default_mqtt_publish_topic() -> String {
+    "ckb.transactions.detailed.proposed".to_string()
+}
+
+fn default_concurrent_requests() -> usize {
+    10
+}
+
+fn default_http_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_http_port() -> u16 {
+    3112
 }
