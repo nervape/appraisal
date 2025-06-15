@@ -13,8 +13,14 @@ pub struct TxDetailService {
     mqtt_client: AsyncClient,
     mqtt_eventloop: rumqttc::EventLoop,
     config: Config,
-    reconnect_attempts: Arc<AtomicU32>,
-    is_reconnecting: Arc<AtomicBool>,
+}
+
+async fn process_transaction(
+    ws_client: Arc<Mutex<WsClient>>,
+    tx: Transaction,
+) -> Result<Transaction, Error> {
+    let mut ws_client = ws_client.lock().await;
+    enrich_transaction(tx, &mut ws_client).await
 }
 
 impl TxDetailService {
@@ -25,25 +31,17 @@ impl TxDetailService {
         let mut mqtt_options =
             MqttOptions::new(&config.mqtt_client_id, &config.mqtt_host, config.mqtt_port);
 
-        if config.mqtt_username.is_some() {
-            mqtt_options.set_credentials(
-                config.mqtt_username.clone().unwrap(),
-                config.mqtt_password.clone().unwrap_or_default(),
-            );
+        if let (Some(username), Some(password)) =
+            (config.mqtt_username.as_ref(), config.mqtt_password.as_ref())
+        {
+            mqtt_options.set_credentials(username, password);
         }
-        
+
         // Increase keep alive for better connection stability
-        mqtt_options.set_keep_alive(Duration::from_secs(30));
+        mqtt_options.set_keep_alive(Duration::from_secs(60));
+        // Use a clean session to avoid session state issues on reconnect
+        mqtt_options.set_clean_session(true);
 
-        mqtt_options.set_max_packet_size(10 * 1024 * 1024, 10 * 1024 * 1024);
-        
-        // Use clean_session(false) to maintain session state on server
-        mqtt_options.set_clean_session(false);
-        
-        // Set manual_acks to false to let the library handle acks automatically
-        mqtt_options.set_manual_acks(false);
-
-        // Create both client and eventloop together
         let (mqtt_client, mqtt_eventloop) = AsyncClient::new(mqtt_options, 10);
 
         Ok(Self {
@@ -51,59 +49,7 @@ impl TxDetailService {
             mqtt_client,
             mqtt_eventloop,
             config: config.clone(),
-            reconnect_attempts: Arc::new(AtomicU32::new(0)),
-            is_reconnecting: Arc::new(AtomicBool::new(false)),
         })
-    }
-
-    async fn process_transaction(&mut self, tx: Transaction) -> Result<Transaction, Error> {
-        let mut ws_client = self.ws_client.lock().await;
-        enrich_transaction(tx, &mut ws_client).await
-    }
-    
-    async fn reconnect_mqtt(&mut self) -> Result<(), Error> {
-        // Mark that we're attempting to reconnect
-        self.is_reconnecting.store(true, Ordering::SeqCst);
-        
-        let attempt = self.reconnect_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        info!("Attempting to reconnect to MQTT broker (attempt #{})...", attempt);
-        
-        // Implement exponential backoff with maximum delay cap
-        let backoff_secs = std::cmp::min(
-            5 * (1 << std::cmp::min(attempt, 6)), // Start with 5 seconds and double up to 6 times
-            300 // Cap at 5 minutes
-        );
-        
-        info!("Waiting {} seconds before reconnecting...", backoff_secs);
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-        
-        // Recreate MQTT client and eventloop with improved settings
-        let mut mqtt_options =
-            MqttOptions::new(&self.config.mqtt_client_id, &self.config.mqtt_host, self.config.mqtt_port);
-
-        if self.config.mqtt_username.is_some() {
-            mqtt_options.set_credentials(
-                self.config.mqtt_username.clone().unwrap(),
-                self.config.mqtt_password.clone().unwrap_or_default(),
-            );
-        }
-        
-        // Increase keep alive for better connection stability
-        mqtt_options.set_keep_alive(Duration::from_secs(30));
-        
-        // Use clean_session(false) to maintain session state on server
-        mqtt_options.set_clean_session(false);
-        
-        // Set manual_acks to false to let the library handle acks automatically
-        mqtt_options.set_manual_acks(false);
-
-        let (new_client, new_eventloop) = AsyncClient::new(mqtt_options, 10);
-        self.mqtt_client = new_client;
-        self.mqtt_eventloop = new_eventloop;
-        
-        self.is_reconnecting.store(false, Ordering::SeqCst);
-        
-        Ok(())
     }
 
     pub async fn start(mut self) -> Result<(), Error> {
@@ -119,105 +65,91 @@ impl TxDetailService {
         });
 
         info!("Starting transaction processing service");
+        let semaphore = Arc::new(Semaphore::new(self.config.concurrent_requests));
+        let mut reconnect_attempts = 0;
 
-        let semaphore = std::sync::Arc::new(Semaphore::new(self.config.concurrent_requests));
-        
         loop {
-            match self.mqtt_client
-                .subscribe(self.config.mqtt_subscribe_topic.clone(), QoS::AtLeastOnce)
-                .await
-            {
-                Ok(_) => {
-                    info!("Successfully subscribed to MQTT topic");
-                    // Reset reconnection attempts on successful subscription
-                    self.reconnect_attempts.store(0, Ordering::SeqCst);
-                },
-                Err(e) => {
-                    error!("Failed to subscribe to MQTT topic: {}", e);
-                    self.reconnect_mqtt().await?;
-                    continue;
-                }
+            if reconnect_attempts > 0 {
+                let backoff_secs = 2u64.pow(reconnect_attempts.min(6) as u32); // Exponential backoff: 2, 4, 8, 16, 32, 64
+                warn!(
+                    "MQTT connection lost. Attempting to reconnect in {} seconds (attempt #{})...",
+                    backoff_secs, reconnect_attempts
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
             }
 
-            let mut last_successful_poll = std::time::Instant::now();
-            let mut health_check_interval = tokio::time::interval(Duration::from_secs(30));
-            
-            'connection: loop {
-                tokio::select! {
-                    notification = self.mqtt_eventloop.poll() => {
-                        match notification {
-                            Ok(event) => {
-                                // Update last successful poll time
-                                last_successful_poll = std::time::Instant::now();
-                                
-                                match event {
-                                    Event::Incoming(rumqttc::Packet::Publish(msg)) => {
-                                        if let Ok(tx_str) = String::from_utf8(msg.payload.to_vec()) {
-                                            debug!("Received transaction: {}", tx_str);
-                                            if let Ok(tx) = serde_json::from_str::<Transaction>(&tx_str) {
-                                                let permit = semaphore.clone().acquire_owned().await.unwrap();
-                                                
-                                                match self.process_transaction(tx).await {
-                                                    Ok(detailed_tx) => {
-                                                        if let Err(e) = self
-                                                            .mqtt_client
-                                                            .publish(
-                                                                self.config.mqtt_publish_topic.clone(),
-                                                                QoS::AtLeastOnce,
-                                                                false,
-                                                                serde_json::to_string(&detailed_tx)?,
-                                                            )
-                                                            .await
-                                                        {
-                                                            error!("Failed to publish detailed transaction: {}", e);
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        error!("Error processing transaction: {}", e);
-                                                    }
-                                                }
-                                                
-                                                drop(permit);
-                                            }
-                                        }
-                                    },
-                                    Event::Incoming(rumqttc::Packet::ConnAck(_)) => {
-                                        info!("MQTT connection established");
-                                        self.reconnect_attempts.store(0, Ordering::SeqCst);
-                                    },
-                                    Event::Incoming(rumqttc::Packet::Disconnect) => {
-                                        warn!("MQTT server sent disconnect packet");
-                                        break 'connection;
-                                    },
-                                    _ => {
-                                        // Other events we don't need to handle specifically
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                error!("MQTT connection error: {}", e);
-                                break 'connection;
-                            }
-                        }
-                    },
-                    
-                    // Periodic health check
-                    _ = health_check_interval.tick() => {
-                        // Check if we're in a stalled state - no successful poll for too long
-                        let elapsed = last_successful_poll.elapsed();
-                        if elapsed > Duration::from_secs(60) {  // No successful poll for 1 minute
-                            error!("MQTT connection appears stalled - no events for {} seconds", elapsed.as_secs());
-                            break 'connection;
-                        }
-                        
-                        debug!("MQTT connection health check passed");
+            // The rumqttc event loop will try to reconnect automatically in the background
+            // when we call `poll()`. If poll returns an error, it's a disconnect.
+            match self.mqtt_eventloop.poll().await {
+                Ok(event) => {
+                    self.handle_mqtt_event(event, semaphore.clone()).await?;
+                    // On any successful event, reset the reconnect counter.
+                    if reconnect_attempts > 0 {
+                        info!("Successfully reconnected to MQTT broker.");
+                        reconnect_attempts = 0;
                     }
                 }
+                Err(e) => {
+                    error!("MQTT connection error: {}. Will attempt to reconnect.", e);
+                    reconnect_attempts += 1;
+                }
             }
-
-            // If we reach here, it means the MQTT connection was lost
-            error!("MQTT connection lost, attempting to reconnect...");
-            self.reconnect_mqtt().await?;
         }
+    }
+
+    async fn handle_mqtt_event(
+        &self,
+        event: Event,
+        semaphore: Arc<Semaphore>,
+    ) -> Result<(), Error> {
+        match event {
+            Event::Incoming(rumqttc::Packet::ConnAck(_)) => {
+                info!("MQTT connection established. Subscribing to topic...");
+                self.mqtt_client
+                    .subscribe(&self.config.mqtt_subscribe_topic, QoS::AtLeastOnce)
+                    .await?;
+            }
+            Event::Incoming(rumqttc::Packet::Publish(msg)) => {
+                let topic = msg.topic.clone();
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let client = self.mqtt_client.clone();
+                let ws_client = self.ws_client.clone();
+                let publish_topic = self.config.mqtt_publish_topic.clone();
+
+                tokio::spawn(async move {
+                    if let Ok(tx) = serde_json::from_slice::<Transaction>(&msg.payload) {
+                        debug!("Received transaction on topic {}: {}", topic, tx.hash);
+                        match process_transaction(ws_client, tx).await {
+                            Ok(detailed_tx) => {
+                                let payload = serde_json::to_string(&detailed_tx)
+                                    .expect("Failed to serialize detailed transaction");
+                                if let Err(e) = client
+                                    .publish(publish_topic, QoS::AtLeastOnce, false, payload)
+                                    .await
+                                {
+                                    error!("Failed to publish detailed transaction: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error processing transaction: {}", e);
+                            }
+                        }
+                    } else {
+                        warn!("Failed to deserialize message on topic {}", topic);
+                    }
+                    drop(permit);
+                });
+            }
+            Event::Incoming(rumqttc::Packet::Disconnect) => {
+                warn!("Received MQTT disconnect packet. The client will attempt to reconnect automatically.");
+            }
+            Event::Outgoing(o) => {
+                debug!("Sent MQTT packet: {:?}", o);
+            }
+            _ => {
+                // Other events we don't need to handle specifically
+            }
+        }
+        Ok(())
     }
 }
