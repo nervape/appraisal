@@ -8,8 +8,6 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::info;
 
 #[derive(Debug, Deserialize)]
@@ -20,11 +18,11 @@ pub struct TransactionRequest {
 }
 
 pub struct HttpServer {
-    ws_client: Arc<Mutex<WsClient>>, // shared with the MQTT sub
+    ws_client: WsClient, // shared with the MQTT sub
 }
 
 impl HttpServer {
-    pub fn new(ws_client: Arc<Mutex<WsClient>>) -> Self {
+    pub fn new(ws_client: WsClient) -> Self {
         Self { ws_client }
     }
 
@@ -78,31 +76,34 @@ fn validate_tx_hash(hash: &str) -> Result<String, String> {
     }
 }
 
-async fn get_transaction_handler(
-    Path(hash): Path<String>,
-    ws_client: Arc<Mutex<WsClient>>,
+async fn get_and_enrich_transaction(
+    hash: &str,
+    enrich: bool,
+    ws_client: WsClient,
 ) -> Result<Json<Transaction>, (StatusCode, String)> {
-    // check tx hash first
-
-    let normalized_hash = match validate_tx_hash(&hash) {
+    let normalized_hash = match validate_tx_hash(hash) {
         Ok(h) => h,
         Err(e) => return Err((StatusCode::BAD_REQUEST, Error::Http(e).to_string())),
     };
 
-    let mut ws_client_guard = ws_client.lock().await;
+    info!(
+        "Processing request for tx: {}, enrich: {}",
+        normalized_hash, enrich
+    );
 
-    match ws_client_guard
-        .get_transactions(&[normalized_hash.clone()])
-        .await
-    {
-        Ok(txs) => {
-            if let Some(tx) = txs.first() {
-                match enrich_transaction(tx.clone(), &mut ws_client_guard).await {
-                    Ok(enriched_tx) => Ok(Json(enriched_tx)),
-                    Err(e) => Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to enrich transaction: {}", e),
-                    )),
+    match ws_client.get_transactions(&[normalized_hash.clone()]).await {
+        Ok(mut txs) => {
+            if let Some(tx) = txs.pop() {
+                if enrich {
+                    match enrich_transaction(tx, &ws_client).await {
+                        Ok(enriched_tx) => Ok(Json(enriched_tx)),
+                        Err(e) => Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to enrich transaction: {}", e),
+                        )),
+                    }
+                } else {
+                    Ok(Json(tx))
                 }
             } else {
                 Err((
@@ -118,51 +119,16 @@ async fn get_transaction_handler(
     }
 }
 
+async fn get_transaction_handler(
+    Path(hash): Path<String>,
+    ws_client: WsClient,
+) -> Result<Json<Transaction>, (StatusCode, String)> {
+    get_and_enrich_transaction(&hash, true, ws_client).await
+}
+
 async fn post_transaction_handler(
     JsonExtractor(payload): JsonExtractor<TransactionRequest>,
-    ws_client: Arc<Mutex<WsClient>>,
+    ws_client: WsClient,
 ) -> Result<Json<Transaction>, (StatusCode, String)> {
-    // check tx hash first
-
-    let normalized_hash = match validate_tx_hash(&payload.tx_hash) {
-        Ok(h) => h,
-        Err(e) => return Err((StatusCode::BAD_REQUEST, Error::Http(e).to_string())),
-    };
-
-    let mut ws_client_guard = ws_client.lock().await;
-
-    info!(
-        "Processing POST request for tx: {}, enrich: {}",
-        normalized_hash, payload.enrich
-    );
-
-    match ws_client_guard
-        .get_transactions(&[normalized_hash.clone()])
-        .await
-    {
-        Ok(txs) => {
-            if let Some(tx) = txs.first() {
-                if payload.enrich {
-                    match enrich_transaction(tx.clone(), &mut ws_client_guard).await {
-                        Ok(enriched_tx) => Ok(Json(enriched_tx)),
-                        Err(e) => Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to enrich transaction: {}", e),
-                        )),
-                    }
-                } else {
-                    Ok(Json(tx.clone()))
-                }
-            } else {
-                Err((
-                    StatusCode::NOT_FOUND,
-                    format!("Transaction {} not found", payload.tx_hash),
-                ))
-            }
-        }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to fetch transaction: {}", e),
-        )),
-    }
+    get_and_enrich_transaction(&payload.tx_hash, payload.enrich, ws_client).await
 }

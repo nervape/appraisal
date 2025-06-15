@@ -4,29 +4,26 @@ use crate::{
 };
 use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub struct TxDetailService {
-    ws_client: Arc<Mutex<WsClient>>,
+    ws_client: WsClient,
     mqtt_client: AsyncClient,
     mqtt_eventloop: rumqttc::EventLoop,
     config: Config,
 }
 
 async fn process_transaction(
-    ws_client: Arc<Mutex<WsClient>>,
+    ws_client: WsClient,
     tx: Transaction,
 ) -> Result<Transaction, Error> {
-    let mut ws_client = ws_client.lock().await;
-    enrich_transaction(tx, &mut ws_client).await
+    enrich_transaction(tx, &ws_client).await
 }
 
 impl TxDetailService {
     pub async fn new(config: &Config) -> Result<Self, Error> {
         let ws_client = WsClient::new(&config.ckb_ws_url).await?;
-        let ws_client = Arc::new(Mutex::new(ws_client));
 
         let mut mqtt_options =
             MqttOptions::new(&config.mqtt_client_id, &config.mqtt_host, config.mqtt_port);
@@ -53,7 +50,7 @@ impl TxDetailService {
     }
 
     pub async fn start(mut self) -> Result<(), Error> {
-        let ws_client_clone = Arc::clone(&self.ws_client);
+        let ws_client_clone = self.ws_client.clone();
 
         let http_server = crate::http::HttpServer::new(ws_client_clone);
 

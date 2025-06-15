@@ -1,6 +1,6 @@
-use crate::types::TransactionWrapper;
 use crate::{error::Error, types::Transaction};
-use futures::{SinkExt, StreamExt};
+use futures::{future::join_all, SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,16 +11,25 @@ use tracing::info;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct TransactionWrapper {
+    pub transaction: Transaction,
+    pub tx_status: String,
+    #[serde(flatten)]
+    pub other: serde_json::Value,
+}
+
+type WsSender = futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Message,
+>;
+
+#[derive(Clone)]
 pub struct WsClient {
-    sender: futures::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        tokio_tungstenite::tungstenite::Message,
-    >,
+    sender: Arc<Mutex<WsSender>>,
     pending_requests: Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>,
-    ws_url: String,
-    reconnect_attempts: std::sync::atomic::AtomicU32,
+    ws_url: Arc<String>,
+    reconnect_attempts: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl WsClient {
@@ -33,23 +42,28 @@ impl WsClient {
         let pending_requests_clone = pending_requests.clone();
 
         // Handle incoming WebSocket messages
-        Self::spawn_message_handler(receiver, pending_requests_clone);
+        let sender = Arc::new(Mutex::new(sender));
+        let sender_clone = sender.clone();
+        let ws_url_arc = Arc::new(ws_url.to_string());
+        let ws_url_clone = ws_url_arc.clone();
+
+        Self::spawn_message_handler(
+            receiver,
+            pending_requests_clone,
+            sender_clone,
+            ws_url_clone,
+        );
 
         Ok(Self {
             sender,
             pending_requests,
-            ws_url: ws_url.to_string(),
-            reconnect_attempts: std::sync::atomic::AtomicU32::new(0),
+            ws_url: ws_url_arc,
+            reconnect_attempts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
     
     async fn establish_connection(ws_url: &str) -> Result<(
-        futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            tokio_tungstenite::tungstenite::Message,
-        >,
+        WsSender,
         futures::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<
                 tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -68,83 +82,56 @@ impl WsClient {
             >,
         >,
         pending_requests: Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>,
+        sender: Arc<Mutex<WsSender>>,
+        ws_url: Arc<String>,
     ) {
         tokio::spawn(async move {
             while let Some(msg) = receiver.next().await {
-                if let Ok(msg) = msg {
-                    if let Ok(response) = serde_json::from_str::<Value>(&msg.to_string()) {
-                        // Handle both single response and batch responses
-                        match response {
-                            Value::Array(responses) => {
-                                let requests = pending_requests.lock().await;
-                                for resp in responses {
-                                    if let Some(id) = resp.get("id").and_then(Value::as_str) {
-                                        debug!("Received response for ID: {}", id);
-                                        if let Some(sender) = requests.get(id) {
-                                            if let Err(e) = sender.send(resp.clone()).await {
-                                                error!("Failed to send response to channel: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Value::Object(_) => {
-                                let requests = pending_requests.lock().await;
-                                if let Some(id) = response.get("id").and_then(Value::as_str) {
+                match msg {
+                    Ok(msg) => {
+                        if let Ok(response) = serde_json::from_str::<Value>(&msg.to_string()) {
+                            let responses = if response.is_array() {
+                                response.as_array().unwrap().clone()
+                            } else {
+                                vec![response]
+                            };
+
+                            let mut requests = pending_requests.lock().await;
+                            for resp in responses {
+                                if let Some(id) = resp.get("id").and_then(Value::as_str) {
+                                    debug!("Received response for ID: {}", id);
                                     if let Some(sender) = requests.get(id) {
-                                        if let Err(e) = sender.send(response.clone()).await {
-                                            error!("Failed to send response to channel: {}", e);
+                                        if sender.send(resp.clone()).await.is_err() {
+                                            error!("Failed to send response to channel for ID: {}", id);
                                         }
                                     }
                                 }
                             }
-                            _ => {}
                         }
+                    }
+                    Err(_) => {
+                        debug!("WebSocket receiver error. Connection may have dropped.");
+                        break; // Exit the loop to handle reconnection
                     }
                 }
             }
-            
-            debug!("WebSocket receiver loop ended");
+
+            debug!("WebSocket receiver loop ended. Attempting to reconnect...");
+            // Connection is lost, we need to reconnect and restart the handler
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await; // wait before reconnecting
+                if let Ok((new_sender, new_receiver)) = Self::establish_connection(&ws_url).await {
+                    info!("Successfully reconnected WebSocket.");
+                    *sender.lock().await = new_sender;
+                    Self::spawn_message_handler(new_receiver, pending_requests, sender, ws_url);
+                    break;
+                }
+            }
         });
     }
     
-    async fn reconnect(&mut self) -> Result<(), Error> {
-        let attempt = self.reconnect_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        warn!("WebSocket connection lost, attempting to reconnect (attempt #{})...", attempt);
-        
-        // Implement exponential backoff with maximum delay cap
-        let backoff_secs = std::cmp::min(
-            1 * (1 << std::cmp::min(attempt, 6)), // Start with 1 second and double up to 6 times
-            60 // Cap at 1 minute
-        );
-        
-        info!("Waiting {} seconds before reconnecting...", backoff_secs);
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-        
-        // Try to reconnect
-        match Self::establish_connection(&self.ws_url).await {
-            Ok((new_sender, receiver)) => {
-                info!("Successfully reconnected to WebSocket");
-                self.sender = new_sender;
-                
-                // Spawn a new message handler for the new connection
-                let pending_requests_clone = self.pending_requests.clone();
-                Self::spawn_message_handler(receiver, pending_requests_clone);
-                
-                // Reset reconnection counter on successful connection
-                self.reconnect_attempts.store(0, std::sync::atomic::Ordering::SeqCst);
-                
-                Ok(())
-            },
-            Err(e) => {
-                error!("Failed to reconnect to WebSocket: {}", e);
-                Err(e)
-            }
-        }
-    }
-
     pub async fn get_transactions(
-        &mut self,
+        &self,
         tx_hashes: &[String],
     ) -> Result<Vec<Transaction>, Error> {
         if tx_hashes.is_empty() {
@@ -168,111 +155,75 @@ impl WsClient {
 
         // Create channels for responses
         let mut response_channels = Vec::new();
+        let mut requests_lock = self.pending_requests.lock().await;
         for request in &batch_requests {
             let id = request["id"].as_str().unwrap().to_string();
             let (tx, rx) = mpsc::channel(1);
-            {
-                let mut requests = self.pending_requests.lock().await;
-                requests.insert(id, tx);
-            }
+            requests_lock.insert(id, tx);
             response_channels.push(rx);
         }
+        drop(requests_lock);
 
-        // Send batch request with retry logic
-        let mut retry_count = 0;
-        let max_retries = 3;
-        
-        while retry_count < max_retries {
-            match self.sender
-                .send(tokio_tungstenite::tungstenite::Message::Text(
-                    serde_json::to_string(&batch_requests)?,
-                ))
-                .await
-            {
-                Ok(_) => break,
-                Err(e) => {
-                    error!("Failed to send WebSocket request: {}", e);
-                    retry_count += 1;
-                    
-                    if retry_count >= max_retries {
-                        return Err(Error::WebSocket(e));
-                    }
-                    
-                    // Try to reconnect before retrying
-                    if let Err(reconnect_err) = self.reconnect().await {
-                        error!("Failed to reconnect: {}", reconnect_err);
-                        return Err(reconnect_err);
-                    }
-                }
-            }
-        }
+        // Send batch request
+        self.sender
+            .lock()
+            .await
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::to_string(&batch_requests)?,
+            ))
+            .await?;
 
-        // Collect responses with timeout
+        // Collect responses concurrently
+        let responses_futures = response_channels
+            .into_iter()
+            .map(|mut rx| tokio::spawn(async move { rx.recv().await }));
+
+        let responses = join_all(responses_futures).await;
+
         let mut transactions = Vec::new();
-        for (i, mut rx) in response_channels.iter_mut().enumerate() {
-            // Add timeout to prevent hanging indefinitely
-            match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
-                Ok(Some(response)) => {
-                    if let Some(result) = response.get("result") {
-                        if result.is_null() {
-                            return Err(Error::TxProcessing(format!(
-                                "Transaction not found: {}",
-                                tx_hashes[i]
-                            )));
-                        }
+        for (i, res) in responses.into_iter().enumerate() {
+            let response = res.unwrap().ok_or_else(|| {
+                Error::TxProcessing(format!("Channel closed for transaction {}", tx_hashes[i]))
+            })?;
 
-                        // Try to parse as TransactionWrapper first
-                        let transaction = if let Ok(wrapper) =
-                            serde_json::from_value::<TransactionWrapper>(result.clone())
-                        {
-                            wrapper.transaction
-                        } else {
-                            // If that fails, try to get the transaction directly from the transaction field
-                            match result.get("transaction") {
-                                Some(tx) => match serde_json::from_value(tx.clone()) {
-                                    Ok(t) => t,
-                                    Err(e) => {
-                                        error!(
-                                            "Failed to parse transaction {}: {}",
-                                            tx_hashes[i], e
-                                        );
-                                        return Err(Error::TxProcessing(format!(
-                                            "Failed to parse transaction {}: {}",
-                                            tx_hashes[i], e
-                                        )));
-                                    }
-                                },
-                                None => {
-                                    error!(
-                                        "No transaction field found in response for {}",
-                                        tx_hashes[i]
-                                    );
-                                    return Err(Error::TxProcessing(format!(
-                                        "No transaction field found in response for {}",
-                                        tx_hashes[i]
-                                    )));
-                                }
-                            }
-                        };
-
-                        transactions.push(transaction);
-                    }
-                },
-                Ok(None) => {
+            if let Some(result) = response.get("result") {
+                if result.is_null() {
                     return Err(Error::TxProcessing(format!(
-                        "Channel closed for transaction {}",
-                        tx_hashes[i]
-                    )));
-                },
-                Err(_) => {
-                    return Err(Error::TxProcessing(format!(
-                        "Timeout waiting for response for transaction {}",
+                        "Transaction not found: {}",
                         tx_hashes[i]
                     )));
                 }
+                let transaction =
+                    if let Ok(wrapper) = serde_json::from_value::<TransactionWrapper>(result.clone())
+                    {
+                        wrapper.transaction
+                    } else {
+                        match result.get("transaction") {
+                            Some(tx) => serde_json::from_value(tx.clone()).map_err(|e| {
+                                error!("Failed to parse transaction {}: {}", tx_hashes[i], e);
+                                Error::TxProcessing(format!(
+                                    "Failed to parse transaction {}: {}",
+                                    tx_hashes[i], e
+                                ))
+                            })?,
+                            None => {
+                                error!("No transaction field found in response for {}", tx_hashes[i]);
+                                return Err(Error::TxProcessing(format!(
+                                    "No transaction field found in response for {}",
+                                    tx_hashes[i]
+                                )));
+                            }
+                        }
+                    };
+
+                transactions.push(transaction);
+            } else if let Some(error) = response.get("error") {
+                return Err(Error::TxProcessing(format!(
+                    "Error fetching transaction {}: {}",
+                    tx_hashes[i], error
+                )));
             }
         }
-
         Ok(transactions)
     }
 }

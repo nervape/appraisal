@@ -7,7 +7,7 @@ use tracing::info;
 
 pub async fn enrich_transaction(
     mut tx: Transaction,
-    ws_client: &mut WsClient,
+    ws_client: &WsClient,
 ) -> Result<Transaction, Error> {
     info!("Enriching transaction: {}", tx.hash);
 
