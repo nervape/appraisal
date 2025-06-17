@@ -8,14 +8,14 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 pub struct TxDetailService {
-    ws_client: WsClient,
+    ws_client: Arc<WsClient>,
     mqtt_client: AsyncClient,
     mqtt_eventloop: rumqttc::EventLoop,
     config: Config,
 }
 
 async fn process_transaction(
-    ws_client: WsClient,
+    ws_client: Arc<WsClient>,
     tx: Transaction,
 ) -> Result<Transaction, Error> {
     enrich_transaction(tx, &ws_client).await
@@ -24,6 +24,7 @@ async fn process_transaction(
 impl TxDetailService {
     pub async fn new(config: &Config) -> Result<Self, Error> {
         let ws_client = WsClient::new(&config.ckb_ws_url).await?;
+        let ws_client = Arc::new(ws_client);
 
         let mut mqtt_options =
             MqttOptions::new(&config.mqtt_client_id, &config.mqtt_host, config.mqtt_port);
@@ -50,7 +51,7 @@ impl TxDetailService {
     }
 
     pub async fn start(mut self) -> Result<(), Error> {
-        let ws_client_clone = self.ws_client.clone();
+        let ws_client_clone = Arc::clone(&self.ws_client);
 
         let http_server = crate::http::HttpServer::new(ws_client_clone);
 

@@ -117,6 +117,11 @@ impl WsClient {
             }
 
             debug!("WebSocket receiver loop ended. Attempting to reconnect...");
+            // By clearing the pending requests, we ensure that any futures waiting on a response
+            // will be immediately notified that the sender has been dropped. This prevents them
+            // from waiting indefinitely for a response that will never come.
+            pending_requests.lock().await.clear();
+
             // Connection is lost, we need to reconnect and restart the handler
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await; // wait before reconnecting

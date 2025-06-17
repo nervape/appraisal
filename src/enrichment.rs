@@ -3,11 +3,12 @@
 
 use crate::{error::Error, types::Transaction, websocket::WsClient};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::info;
 
 pub async fn enrich_transaction(
     mut tx: Transaction,
-    ws_client: &WsClient,
+    ws_client: &Arc<WsClient>,
 ) -> Result<Transaction, Error> {
     info!("Enriching transaction: {}", tx.hash);
 
