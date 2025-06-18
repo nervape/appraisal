@@ -179,17 +179,38 @@ impl WsClient {
             .await?;
 
         // Collect responses concurrently
-        let responses_futures = response_channels
-            .into_iter()
-            .map(|mut rx| tokio::spawn(async move { rx.recv().await }));
+        let responses_futures = response_channels.into_iter().map(|mut rx| {
+            tokio::spawn(async move {
+                // Add a timeout for receiving the response
+                tokio::time::timeout(Duration::from_secs(10), rx.recv()).await
+            })
+        });
 
         let responses = join_all(responses_futures).await;
 
         let mut transactions = Vec::new();
         for (i, res) in responses.into_iter().enumerate() {
-            let response = res.unwrap().ok_or_else(|| {
-                Error::TxProcessing(format!("Channel closed for transaction {}", tx_hashes[i]))
-            })?;
+            let response = match res {
+                Ok(Ok(Some(value))) => value,
+                Ok(Ok(None)) => {
+                    return Err(Error::TxProcessing(format!(
+                        "Channel closed for transaction {}",
+                        tx_hashes[i]
+                    )));
+                }
+                Ok(Err(_)) => {
+                    return Err(Error::TxProcessing(format!(
+                        "Timeout waiting for transaction {}",
+                        tx_hashes[i]
+                    )));
+                }
+                Err(_) => {
+                    return Err(Error::TxProcessing(format!(
+                        "Task panicked for transaction {}",
+                        tx_hashes[i]
+                    )));
+                }
+            };
 
             if let Some(result) = response.get("result") {
                 if result.is_null() {

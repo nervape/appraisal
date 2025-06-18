@@ -100,54 +100,47 @@ impl TxDetailService {
         event: Event,
         semaphore: Arc<Semaphore>,
     ) -> Result<(), Error> {
-        match event {
-            Event::Incoming(rumqttc::Packet::ConnAck(_)) => {
-                info!("MQTT connection established. Subscribing to topic...");
-                self.mqtt_client
-                    .subscribe(&self.config.mqtt_subscribe_topic, QoS::AtLeastOnce)
-                    .await?;
-            }
-            Event::Incoming(rumqttc::Packet::Publish(msg)) => {
-                let topic = msg.topic.clone();
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
-                let client = self.mqtt_client.clone();
-                let ws_client = self.ws_client.clone();
-                let publish_topic = self.config.mqtt_publish_topic.clone();
+        if let Event::Incoming(rumqttc::Packet::ConnAck(_)) = event {
+            info!("MQTT connection established/re-established. Subscribing to topic...");
+            self.mqtt_client
+                .subscribe(&self.config.mqtt_subscribe_topic, QoS::AtLeastOnce)
+                .await?;
+        } else if let Event::Incoming(rumqttc::Packet::Publish(msg)) = event {
+            let topic = msg.topic.clone();
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let client = self.mqtt_client.clone();
+            let ws_client = self.ws_client.clone();
+            let publish_topic = self.config.mqtt_publish_topic.clone();
 
-                tokio::spawn(async move {
-                    if let Ok(tx) = serde_json::from_slice::<Transaction>(&msg.payload) {
-                        debug!("Received transaction on topic {}: {}", topic, tx.hash);
-                        match process_transaction(ws_client, tx).await {
-                            Ok(detailed_tx) => {
-                                let payload = serde_json::to_string(&detailed_tx)
-                                    .expect("Failed to serialize detailed transaction");
-                                if let Err(e) = client
-                                    .publish(publish_topic, QoS::AtLeastOnce, false, payload)
-                                    .await
-                                {
-                                    error!("Failed to publish detailed transaction: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("Error processing transaction: {}", e);
+            tokio::spawn(async move {
+                if let Ok(tx) = serde_json::from_slice::<Transaction>(&msg.payload) {
+                    debug!("Received transaction on topic {}: {}", topic, tx.hash);
+                    match process_transaction(ws_client, tx).await {
+                        Ok(detailed_tx) => {
+                            let payload = serde_json::to_string(&detailed_tx)
+                                .expect("Failed to serialize detailed transaction");
+                            if let Err(e) = client
+                                .publish(publish_topic, QoS::AtLeastOnce, false, payload)
+                                .await
+                            {
+                                error!("Failed to publish detailed transaction: {}", e);
                             }
                         }
-                    } else {
-                        warn!("Failed to deserialize message on topic {}", topic);
+                        Err(e) => {
+                            error!("Error processing transaction: {}", e);
+                        }
                     }
-                    drop(permit);
-                });
-            }
-            Event::Incoming(rumqttc::Packet::Disconnect) => {
-                warn!("Received MQTT disconnect packet. The client will attempt to reconnect automatically.");
-            }
-            Event::Outgoing(o) => {
-                debug!("Sent MQTT packet: {:?}", o);
-            }
-            _ => {
-                // Other events we don't need to handle specifically
-            }
+                } else {
+                    warn!("Failed to deserialize message on topic {}", topic);
+                }
+                drop(permit);
+            });
+        } else if let Event::Incoming(rumqttc::Packet::Disconnect) = event {
+            warn!("Received MQTT disconnect packet. The client will attempt to reconnect automatically.");
+        } else {
+            debug!("Received MQTT event: {:?}", event);
         }
+
         Ok(())
     }
 }
