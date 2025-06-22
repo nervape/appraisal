@@ -169,14 +169,24 @@ impl WsClient {
         }
         drop(requests_lock);
 
-        // Send batch request
-        self.sender
-            .lock()
-            .await
-            .send(tokio_tungstenite::tungstenite::Message::Text(
+        // Send batch request with a timeout
+        let mut sender = self.sender.lock().await;
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            sender.send(tokio_tungstenite::tungstenite::Message::Text(
                 serde_json::to_string(&batch_requests)?,
-            ))
-            .await?;
+            )),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(Error::WebSocket(e)),
+            Err(_) => {
+                return Err(Error::TxProcessing(
+                    "Timeout sending request".to_string(),
+                ))
+            }
+        }
 
         // Collect responses concurrently
         let responses_futures = response_channels.into_iter().map(|mut rx| {
