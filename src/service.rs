@@ -107,12 +107,13 @@ impl TxDetailService {
                 .await?;
         } else if let Event::Incoming(rumqttc::Packet::Publish(msg)) = event {
             let topic = msg.topic.clone();
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
             let client = self.mqtt_client.clone();
             let ws_client = self.ws_client.clone();
             let publish_topic = self.config.mqtt_publish_topic.clone();
+            let semaphore = semaphore.clone();
 
             tokio::spawn(async move {
+                let permit = semaphore.acquire_owned().await.unwrap();
                 if let Ok(tx) = serde_json::from_slice::<Transaction>(&msg.payload) {
                     debug!("Received transaction on topic {}: {}", topic, tx.hash);
                     match process_transaction(ws_client, tx).await {
